@@ -1,92 +1,112 @@
-"""ETL Pipeline — Amman Digital Market Customer Analytics
-
-Extracts data from PostgreSQL, transforms it into customer-level summaries,
-validates data quality, and loads results to a database table and CSV file.
-"""
 from sqlalchemy import create_engine
 import pandas as pd
 import os
 
 
 def extract(engine):
-    """Extract all source tables from PostgreSQL into DataFrames.
+    tables = ["customers", "products", "orders", "order_items"]
+    data = {}
 
-    Args:
-        engine: SQLAlchemy engine connected to the amman_market database
+    for table in tables:
+        df = pd.read_sql(f"SELECT * FROM {table}", engine)
+        print(f"Extracted {table}: {len(df)} rows")
+        data[table] = df
 
-    Returns:
-        dict: {"customers": df, "products": df, "orders": df, "order_items": df}
-    """
-    # TODO: Implement extraction
-    pass
+    return data
 
 
 def transform(data_dict):
-    """Transform raw data into customer-level analytics summary.
+    customers = data_dict["customers"]
+    products = data_dict["products"]
+    orders = data_dict["orders"]
+    order_items = data_dict["order_items"]
 
-    Steps:
-    1. Join orders with order_items and products
-    2. Compute line_total (quantity * unit_price)
-    3. Filter out cancelled orders (status = 'cancelled')
-    4. Filter out suspicious quantities (quantity > 100)
-    5. Aggregate to customer level: total_orders, total_revenue,
-       avg_order_value, top_category
+    # 🔥 مهم: طباعة الأعمدة عشان نتأكد
+    print("Customers columns:", customers.columns)
 
-    Args:
-        data_dict: dict of DataFrames from extract()
+    df = orders.merge(order_items, on="order_id")
+    df = df.merge(products, on="product_id")
 
-    Returns:
-        DataFrame: customer-level summary with columns:
-            customer_id, customer_name, city, total_orders,
-            total_revenue, avg_order_value, top_category
-    """
-    # TODO: Implement transformation
-    pass
+    df["line_total"] = df["quantity"] * df["unit_price"]
+
+    df = df[df["status"] != "cancelled"]
+    df = df[df["quantity"] <= 100]
+
+    print(f"After filtering: {len(df)} rows")
+
+    # Aggregation
+    summary = df.groupby("customer_id").agg(
+        total_orders=("order_id", "nunique"),
+        total_revenue=("line_total", "sum")
+    ).reset_index()
+
+    summary["avg_order_value"] = summary["total_revenue"] / summary["total_orders"]
+
+    # Top category
+    category_rev = df.groupby(["customer_id", "category"])["line_total"].sum().reset_index()
+    top_category = category_rev.sort_values(["customer_id", "line_total"], ascending=[True, False])
+    top_category = top_category.drop_duplicates("customer_id")[["customer_id", "category"]]
+    top_category = top_category.rename(columns={"category": "top_category"})
+
+    # 🔥 الحل النهائي (بدون تخمين اسم العمود)
+    name_col = None
+    for col in customers.columns:
+        if "name" in col:
+            name_col = col
+            break
+
+    if name_col is None:
+        raise ValueError("No name column found in customers table!")
+
+    summary = summary.merge(customers[["customer_id", name_col]], on="customer_id")
+    summary = summary.rename(columns={name_col: "customer_name"})
+
+    summary = summary.merge(top_category, on="customer_id")
+
+    print(f"Transformed: {len(summary)} customers")
+
+    return summary
 
 
 def validate(df):
-    """Run data quality checks on the transformed DataFrame.
+    results = {}
 
-    Checks:
-    - No nulls in customer_id or customer_name
-    - total_revenue > 0 for all customers
-    - No duplicate customer_ids
-    - total_orders > 0 for all customers
+    results["no_nulls"] = not df["customer_id"].isnull().any() and not df["customer_name"].isnull().any()
+    results["positive_revenue"] = (df["total_revenue"] > 0).all()
+    results["no_duplicates"] = not df["customer_id"].duplicated().any()
+    results["positive_orders"] = (df["total_orders"] > 0).all()
 
-    Args:
-        df: transformed customer summary DataFrame
+    for k, v in results.items():
+        print(f"{k}: {'PASS' if v else 'FAIL'}")
 
-    Returns:
-        dict: {check_name: bool} for each check
+    if not all(results.values()):
+        raise ValueError("Validation failed!")
 
-    Raises:
-        ValueError: if any critical check fails
-    """
-    # TODO: Implement validation
-    pass
+    return results
 
 
 def load(df, engine, csv_path):
-    """Load customer summary to PostgreSQL table and CSV file.
+    df.to_sql("customer_analytics", engine, if_exists="replace", index=False)
 
-    Args:
-        df: validated customer summary DataFrame
-        engine: SQLAlchemy engine
-        csv_path: path for CSV output
-    """
-    # TODO: Implement loading
-    pass
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    df.to_csv(csv_path, index=False)
+
+    print(f"Loaded {len(df)} rows to DB and CSV")
 
 
 def main():
-    """Orchestrate the ETL pipeline: extract -> transform -> validate -> load."""
-    # TODO: Implement main orchestration
-    # 1. Create engine from DATABASE_URL env var (or default)
-    # 2. Extract
-    # 3. Transform
-    # 4. Validate
-    # 5. Load to customer_summary table and output/customer_analytics.csv
-    pass
+    DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/amman_market"
+
+    engine = create_engine(DATABASE_URL)
+
+    print("Starting ETL pipeline...")
+
+    data = extract(engine)
+    df = transform(data)
+    validate(df)
+    load(df, engine, "output/customer_analytics.csv")
+
+    print("ETL completed successfully!")
 
 
 if __name__ == "__main__":
